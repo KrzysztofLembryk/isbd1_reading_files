@@ -96,7 +96,7 @@ uint16_t		crc_xmodem(         const unsigned char *input_str, size_t num_bytes  
 uint8_t			update_crc_8(       uint8_t  crc, unsigned char c                          );
 uint16_t		update_crc_16(      uint16_t crc, unsigned char c                          );
 uint32_t		update_crc_32(      uint32_t crc, unsigned char c                          );
-uint64_t		update_crc_64_ecma( uint64_t crc, unsigned char c                          );
+uint64_t		update_crc_64( uint64_t crc, unsigned char c                          );
 uint16_t		update_crc_ccitt(   uint16_t crc, unsigned char c                          );
 uint16_t		update_crc_dnp(     uint16_t crc, unsigned char c                          );
 uint16_t		update_crc_kermit(  uint16_t crc, unsigned char c                          );

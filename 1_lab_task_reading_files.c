@@ -24,8 +24,8 @@ enum Strategy
 // test_file_medium = 8.6MB
 // test_file_big = xGB
 
-const size_t BUFF_SIZE = 20000000;    // 20 000 000 = 20 000 kB = 20 MB
-const size_t READ_COUNT_SIZE = 16000; // 16kB
+const size_t BUFF_SIZE = 2000000;    // 200 MB
+const size_t READ_COUNT_SIZE = 160000; // 16MB
 
 #define ERROR -1
 #define SUCCESS 0
@@ -152,6 +152,7 @@ int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
 {
     ssize_t bytes_read = 0;
     size_t bytes_sum = 0;
+    size_t all_bytes_read = 0;
     uint64_t crc_val;
 
     if (file_size <= BUFF_SIZE)
@@ -179,9 +180,11 @@ int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
             {
                 bytes_read = read(file_descr, buff + bytes_sum, READ_COUNT_SIZE);
             }
-
+            
             bytes_sum += bytes_read;
+            all_bytes_read += bytes_read;
             available_buff_space -= bytes_read;
+            printf("bytes read: %lu, bytes sum: %lu, available memory: %lu\n", bytes_read, bytes_sum, available_buff_space);
 
             if (available_buff_space == 0)
             {
@@ -194,6 +197,8 @@ int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
 
         } while (bytes_read != 0 && bytes_read != -1);
     }
+
+    printf("FILE SIZE: %lu, all bytes read: %lu\n", file_size, all_bytes_read);
 
     if (bytes_read == -1)
     {
@@ -212,8 +217,10 @@ uint64_t calc_crc64_from_stream(
     uint64_t crc_val
 )
 {
-    for (int i = 0; i < buf_len; i++)
-        crc_val = update_crc_64_ecma(crc_val, buff[i]);
+    for (size_t i = 0; i < buf_len; i++)
+        crc_val = update_crc_64(crc_val, buff[i]);
+
+    printf("crc partial val: %lu\n", crc_val);
     return crc_val;
 }
 
@@ -229,7 +236,7 @@ void parse_cmdl_args(int argc,
 
     // ':' at the front allows programme to distinguish between '?' and ':' case
     // ':' right after option means this option must have value supplied
-    while ((option = getopt(argc, argv, ":hf:s")) != -1)
+    while ((option = getopt(argc, argv, ":hf:s:")) != -1)
     {
         switch (option)
         {
@@ -275,7 +282,7 @@ void parse_cmdl_args(int argc,
                 *strategy = MMAP_RAND;
             else
             {
-                printf("Unknown reading strategy: %s\n", optarg);
+                printf("Unknown reading strategy\n");
                 exit(EXIT_FAILURE);
             }
             break;
