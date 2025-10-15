@@ -6,7 +6,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <stdbool.h>
-// #include "./libcrc/include/checksum.h"
+#include "./libcrc/include/checksum.h"
 
 // ####################################################
 // ############## CONSTANTS DECLARATION ###############
@@ -24,8 +24,11 @@ enum Strategy
 // test_file_medium = 8.6MB
 // test_file_big = xGB
 
-const size_t BUFF_SIZE = 16000000;    // 16 000 000 = 16 000 kB = 16 MB
+const size_t BUFF_SIZE = 20000000;    // 20 000 000 = 20 000 kB = 20 MB
 const size_t READ_COUNT_SIZE = 16000; // 16kB
+
+#define ERROR -1
+#define SUCCESS 0
 
 // ####################################################
 // ############ FUNCTIONS PRE-DECLARATIONS ############
@@ -36,6 +39,16 @@ void parse_cmdl_args(int argc,
                      const char **file_path,
                      enum Strategy *strategy);
 
+void write_to_file(const unsigned char *buff, size_t buf_len);
+
+int read_sequential(int file_descr, unsigned char *buff, size_t file_size);
+
+uint64_t calc_crc64_from_stream(
+    const unsigned char *buff,
+    size_t buf_len,
+    uint64_t crc_val
+);
+
 // ####################################################
 // ################# IMPLEMENTATION ###################
 // ####################################################
@@ -44,7 +57,6 @@ int main(int argc, char *argv[])
 {
     const char *file_path = NULL;
     enum Strategy reading_strategy;
-    char *buff = (char *)calloc(BUFF_SIZE, sizeof(char));
 
     parse_cmdl_args(argc, argv, &file_path, &reading_strategy);
 
@@ -65,50 +77,34 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    unsigned char *buff = (unsigned char *)calloc(BUFF_SIZE, sizeof(unsigned char));
     size_t file_size = file_metadata.st_size;
-
-    printf("opened file size: %ld\n", file_size);
+    ssize_t bytes_read = 0;
+    size_t bytes_sum = 0;
 
     // start measuring time
     switch (reading_strategy)
     {
     case READ_SEQ:
-        ssize_t bytes_read = 0;
-        do
-        {
-            bytes_read = read(file_descr, buff + bytes_read, READ_COUNT_SIZE);
-            file_size += bytes_read;
-        } while (bytes_read != 0 && bytes_read != -1);
-
-        if (bytes_read == -1)
-        {
-            close(file_descr);
-            printf("Encountered error while reading file using READ_SEQ\n");
-            exit(EXIT_FAILURE);
-        }
-
-
-        printf("Reading done");
+        read_sequential(file_descr, buff, file_size);
         break;
-
     case READ_RAND:
+        bytes_read = 0;
+        bytes_sum = 0;
         // to be able to use fseek we must have FILE*, so we create it from our file descriptor
         FILE *f_stream = fdopen(file_descr, "r");
 
         bool read_front = true;
-        size_t bytes_read = 0;
         size_t bytes_read_front = 0;
         // we start reading from front, so if file_size < READ_COUNT_SIZE we will just read all
         // data from front, so even though file_size - READ_COUNT_SIZE < 0 we will not use it
         size_t bytes_read_end = file_size - READ_COUNT_SIZE; // or should be file_size - 1
-        size_t read_bytes_sum = 0;
 
         do
         {
             if (read_front)
             {
                 if (fseek(f_stream, bytes_read_front, SEEK_SET) == -1)
-                    ;
                 {
                     printf("fseek encountered error\n");
                     // TODO: add flag and break that checks if success or not
@@ -121,7 +117,7 @@ int main(int argc, char *argv[])
             else
             {
             }
-            read_bytes_sum += bytes_read;
+            bytes_sum += bytes_read;
         } while (bytes_read != 0);
 
         if (bytes_read_front > bytes_read_end)
@@ -152,6 +148,75 @@ int main(int argc, char *argv[])
     return 0;
 }
 
+int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
+{
+    ssize_t bytes_read = 0;
+    size_t bytes_sum = 0;
+    uint64_t crc_val;
+
+    if (file_size <= BUFF_SIZE)
+    {
+        do
+        {
+            bytes_read = read(file_descr, buff + bytes_sum, READ_COUNT_SIZE);
+            bytes_sum += bytes_read;
+        } while (bytes_read != 0 && bytes_read != -1);
+
+        crc_val = crc_64_ecma(buff, bytes_sum);
+    }
+    else
+    {
+        crc_val = CRC_START_64_ECMA;
+        size_t available_buff_space = BUFF_SIZE;
+
+        do
+        {
+            if (available_buff_space < READ_COUNT_SIZE)
+            {
+                bytes_read = read(file_descr, buff + bytes_sum, available_buff_space);
+            }
+            else
+            {
+                bytes_read = read(file_descr, buff + bytes_sum, READ_COUNT_SIZE);
+            }
+
+            bytes_sum += bytes_read;
+            available_buff_space -= bytes_read;
+
+            if (available_buff_space == 0)
+            {
+                available_buff_space = BUFF_SIZE;
+                bytes_sum = 0;
+                crc_val = calc_crc64_from_stream(buff, BUFF_SIZE, crc_val);
+            }
+            else if (bytes_read == 0)
+                crc_val = calc_crc64_from_stream(buff, bytes_sum, crc_val);
+
+        } while (bytes_read != 0 && bytes_read != -1);
+    }
+
+    if (bytes_read == -1)
+    {
+        printf("Encountered error while reading file using READ_SEQ\n");
+        return ERROR;
+    }
+
+    printf("CRC64 for Reading Seq: %lu\n", crc_val);
+
+    return SUCCESS;
+}
+
+uint64_t calc_crc64_from_stream(
+    const unsigned char *buff,
+    size_t buf_len,
+    uint64_t crc_val
+)
+{
+    for (int i = 0; i < buf_len; i++)
+        crc_val = update_crc_64_ecma(crc_val, buff[i]);
+    return crc_val;
+}
+
 void parse_cmdl_args(int argc,
                      char *argv[],
                      const char **file_path,
@@ -164,7 +229,7 @@ void parse_cmdl_args(int argc,
 
     // ':' at the front allows programme to distinguish between '?' and ':' case
     // ':' right after option means this option must have value supplied
-    while ((option = getopt(argc, argv, ":hf:s:")) != -1)
+    while ((option = getopt(argc, argv, ":hf:s")) != -1)
     {
         switch (option)
         {
@@ -231,11 +296,12 @@ void parse_cmdl_args(int argc,
         printf("Error: Missing required option -f, use -h for help\n");
         exit(EXIT_FAILURE);
     }
+}
 
-    if (!is_strategy_provided)
-    {
-
-        printf("Error: Missing required option -s, use -h for help\n");
-        exit(EXIT_FAILURE);
-    }
+void write_to_file(const unsigned char *buff, size_t buf_len)
+{
+    int fd = open("./read_short_file", O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP);
+    if (write(fd, buff, buf_len) == -1)
+        printf("Write error\n");
+    close(fd);
 }
