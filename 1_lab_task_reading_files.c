@@ -20,12 +20,11 @@ enum Strategy
     MMAP_RAND
 } Strategy;
 
-// test_file_short = 8kB
-// test_file_medium = 8.6MB
-// test_file_big = xGB
+const size_t KB_1 = 1000;
+const size_t MB_1 = 1000 * KB_1;
 
-const size_t BUFF_SIZE = 2000000;    // 200 MB
-const size_t READ_COUNT_SIZE = 160000; // 16MB
+const size_t BLOCK_SIZE = MB_1;    
+const size_t READ_COUNT_SIZE = 2; 
 
 #define ERROR -1
 #define SUCCESS 0
@@ -39,7 +38,7 @@ void parse_cmdl_args(int argc,
                      const char **file_path,
                      enum Strategy *strategy);
 
-void write_to_file(const unsigned char *buff, size_t buf_len);
+void write_to_file(const unsigned char *buff, size_t buf_len, const char *filename);
 
 int read_sequential(int file_descr, unsigned char *buff, size_t file_size);
 
@@ -77,10 +76,14 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    unsigned char *buff = (unsigned char *)calloc(BUFF_SIZE, sizeof(unsigned char));
+    unsigned char *buff = (unsigned char *)calloc(BLOCK_SIZE, sizeof(unsigned char));
     size_t file_size = file_metadata.st_size;
     ssize_t bytes_read = 0;
     size_t bytes_sum = 0;
+
+    printf("###############################\n");
+    printf("opened file: %s, file size: %lu\n", file_path, file_size);
+    printf("###############################\n");
 
     // start measuring time
     switch (reading_strategy)
@@ -91,14 +94,21 @@ int main(int argc, char *argv[])
     case READ_RAND:
         bytes_read = 0;
         bytes_sum = 0;
+
         // to be able to use fseek we must have FILE*, so we create it from our file descriptor
         FILE *f_stream = fdopen(file_descr, "r");
+        if (!f_stream)
+        {
+            printf("error when making FILE* from file descriptor\n");
+            exit(EXIT_FAILURE);
+        }
 
+        size_t nbr_bytes_to_read = READ_COUNT_SIZE;
         bool read_front = true;
         size_t bytes_read_front = 0;
         // we start reading from front, so if file_size < READ_COUNT_SIZE we will just read all
         // data from front, so even though file_size - READ_COUNT_SIZE < 0 we will not use it
-        size_t bytes_read_end = file_size - READ_COUNT_SIZE; // or should be file_size - 1
+        size_t bytes_read_end = file_size > READ_COUNT_SIZE ? file_size - READ_COUNT_SIZE : file_size; // or should be file_size - 1
 
         do
         {
@@ -106,29 +116,63 @@ int main(int argc, char *argv[])
             {
                 if (fseek(f_stream, bytes_read_front, SEEK_SET) == -1)
                 {
-                    printf("fseek encountered error\n");
+                    printf("fseek front encountered error\n");
                     // TODO: add flag and break that checks if success or not
                     exit(EXIT_FAILURE);
                 }
-                read_front = !read_front;
-                bytes_read = fread(buff, sizeof(char), READ_COUNT_SIZE, f_stream);
-                bytes_read_front += bytes_read;
             }
             else
             {
+                if (fseek(f_stream, bytes_read_end, SEEK_SET) == -1)
+                {
+                    printf("fseek end encountered error\n");
+                    // TODO: add flag and break that checks if success or not
+                    exit(EXIT_FAILURE);
+                }
             }
+
+            bytes_read = fread(buff + bytes_sum, sizeof(unsigned char), nbr_bytes_to_read, f_stream);
+
             bytes_sum += bytes_read;
-        } while (bytes_read != 0);
 
-        if (bytes_read_front > bytes_read_end)
-        {
-            // this case happens when we read from front, and there is still
-            // data to read but of size less then READ_COUNT, so our bytes_read_end will
-            // go back too much and we will read too much data, thus we will read from front
-            // only the amount that is left
-        }
+            if (read_front)
+            {
+                printf("reading front\n");
+                bytes_read_front += bytes_read;
+                
+            }
+            else 
+            {
+                printf("reading end\n");
+                bytes_read_end -= bytes_read;
+            }
+            read_front = !read_front;
 
-        printf("READ_RAND strategy\n");
+            printf("bytes_read: %lu\n", bytes_read);
+
+            if (file_size - bytes_sum < READ_COUNT_SIZE)
+            {
+                printf("available data: %lu is less than read count: %lu\n", (file_size - bytes_sum), READ_COUNT_SIZE);
+                nbr_bytes_to_read = file_size - bytes_sum;
+                read_front = true;
+            }
+
+            if (bytes_sum == file_size)
+            {
+                printf("bytes_sum == file_size == %lu\n", file_size);
+                printf("bytes_read: %lu\n", bytes_read);
+                printf("read_front: %d \n", read_front);
+                break;
+            }
+        } while (bytes_read != 0 && bytes_read != -1);
+
+        write_to_file(buff, bytes_sum, "./read_rand_output");
+        uint64_t crc_val = crc_64_ecma(buff, bytes_sum);
+        // 8897370153309143817
+        // 407967422317943898
+        // 6609718696175242621 <-- read_seq
+
+        printf("CRC64 for Reading Rand: %lu\n", crc_val);
         break;
 
     case MMAP_SEQ:
@@ -152,11 +196,12 @@ int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
 {
     ssize_t bytes_read = 0;
     size_t bytes_sum = 0;
-    size_t all_bytes_read = 0;
     uint64_t crc_val;
 
-    if (file_size <= BUFF_SIZE)
+    if (file_size <= BLOCK_SIZE)
     {
+        // if file_size <= BLOCK_SIZE we can store whole file's data inside our
+        // buffer and just use crc_64_ecma to calculate crc64
         do
         {
             bytes_read = read(file_descr, buff + bytes_sum, READ_COUNT_SIZE);
@@ -167,38 +212,38 @@ int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
     }
     else
     {
+        // If buffer is to small we read data till we have space, calculate part
+        // of crc using update_crc64, then we repeat this process
         crc_val = CRC_START_64_ECMA;
-        size_t available_buff_space = BUFF_SIZE;
+        size_t available_buff_space = BLOCK_SIZE;
 
         do
         {
             if (available_buff_space < READ_COUNT_SIZE)
-            {
-                bytes_read = read(file_descr, buff + bytes_sum, available_buff_space);
-            }
+                bytes_read = read(file_descr, buff + bytes_sum,available_buff_space);
             else
-            {
                 bytes_read = read(file_descr, buff + bytes_sum, READ_COUNT_SIZE);
-            }
             
             bytes_sum += bytes_read;
-            all_bytes_read += bytes_read;
             available_buff_space -= bytes_read;
-            printf("bytes read: %lu, bytes sum: %lu, available memory: %lu\n", bytes_read, bytes_sum, available_buff_space);
 
             if (available_buff_space == 0)
             {
-                available_buff_space = BUFF_SIZE;
+                // if we ran out of space in buffer we calculate partial crc64
+                available_buff_space = BLOCK_SIZE;
                 bytes_sum = 0;
-                crc_val = calc_crc64_from_stream(buff, BUFF_SIZE, crc_val);
+                crc_val = calc_crc64_from_stream(buff, BLOCK_SIZE, crc_val);
             }
             else if (bytes_read == 0)
+            {
+                // If bytes_sum == 0, calc_crc64_from_stream won't do anything.
+                // Both bytes_sum and bytes_read may be 0, when file size is a 
+                // multiple of buff size
                 crc_val = calc_crc64_from_stream(buff, bytes_sum, crc_val);
+            }
 
         } while (bytes_read != 0 && bytes_read != -1);
     }
-
-    printf("FILE SIZE: %lu, all bytes read: %lu\n", file_size, all_bytes_read);
 
     if (bytes_read == -1)
     {
@@ -206,7 +251,7 @@ int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
         return ERROR;
     }
 
-    printf("CRC64 for Reading Seq: %lu\n", crc_val);
+    printf("CRC64 for Reading Sequential: %lu\n", crc_val);
 
     return SUCCESS;
 }
@@ -257,7 +302,7 @@ void parse_cmdl_args(int argc,
             }
             else
             {
-                printf("Opening file: %s\n", optarg);
+                // printf("Opening file: %s\n", optarg);
                 *file_path = optarg;
                 is_file_path_provided = 1;
             }
@@ -268,7 +313,7 @@ void parse_cmdl_args(int argc,
                 printf("Option -s is allowed to be used only once\n");
                 exit(EXIT_FAILURE);
             }
-            printf("chosen strategy: %s\n", optarg);
+            // printf("chosen strategy: %s\n", optarg);
 
             is_strategy_provided = 1;
 
@@ -305,9 +350,9 @@ void parse_cmdl_args(int argc,
     }
 }
 
-void write_to_file(const unsigned char *buff, size_t buf_len)
+void write_to_file(const unsigned char *buff, size_t buf_len, const char *filename)
 {
-    int fd = open("./read_short_file", O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP);
+    int fd = open(filename, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP);
     if (write(fd, buff, buf_len) == -1)
         printf("Write error\n");
     close(fd);
