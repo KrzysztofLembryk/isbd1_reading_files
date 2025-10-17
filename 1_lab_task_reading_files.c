@@ -6,6 +6,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <inttypes.h>
 #include "./libcrc/include/checksum.h"
 
 // ####################################################
@@ -23,8 +25,7 @@ enum Strategy
 const size_t KB_1 = 1000;
 const size_t MB_1 = 1000 * KB_1;
 
-const size_t BLOCK_SIZE = MB_1;    
-const size_t READ_COUNT_SIZE = 2; 
+const size_t BLOCK_SIZE = KB_1;    
 
 #define ERROR -1
 #define SUCCESS 0
@@ -40,13 +41,19 @@ void parse_cmdl_args(int argc,
 
 void write_to_file(const unsigned char *buff, size_t buf_len, const char *filename);
 
-int read_sequential(int file_descr, unsigned char *buff, size_t file_size);
+uint64_t read_sequential(const char* file_path, unsigned char *buff);
+
+uint64_t read_rand(const char *file_path, unsigned char *buff);
 
 uint64_t calc_crc64_from_stream(
+    uint64_t crc_val,
     const unsigned char *buff,
-    size_t buf_len,
-    uint64_t crc_val
+    size_t buf_len
 );
+
+int open_file(const char* file_path);
+
+int get_file_metadata(int file_descr, struct stat *file_metadata);
 
 // ####################################################
 // ################# IMPLEMENTATION ###################
@@ -59,122 +66,17 @@ int main(int argc, char *argv[])
 
     parse_cmdl_args(argc, argv, &file_path, &reading_strategy);
 
-    // opening file
-    int file_descr = open(file_path, O_RDONLY);
-    struct stat file_metadata;
-
-    if (file_descr == -1)
-    {
-        printf("Provided file does not exist");
-        exit(EXIT_FAILURE);
-    }
-
-    // getting file metadata so that we know file size
-    if (fstat(file_descr, &file_metadata) == -1)
-    {
-        printf("fstat returned error\n");
-        exit(EXIT_FAILURE);
-    }
-
     unsigned char *buff = (unsigned char *)calloc(BLOCK_SIZE, sizeof(unsigned char));
-    size_t file_size = file_metadata.st_size;
-    ssize_t bytes_read = 0;
-    size_t bytes_sum = 0;
-
-    printf("###############################\n");
-    printf("opened file: %s, file size: %lu\n", file_path, file_size);
-    printf("###############################\n");
 
     // start measuring time
     switch (reading_strategy)
     {
     case READ_SEQ:
-        read_sequential(file_descr, buff, file_size);
+        read_sequential(file_path, buff);
         break;
     case READ_RAND:
-        bytes_read = 0;
-        bytes_sum = 0;
-
-        // to be able to use fseek we must have FILE*, so we create it from our file descriptor
-        FILE *f_stream = fdopen(file_descr, "r");
-        if (!f_stream)
-        {
-            printf("error when making FILE* from file descriptor\n");
-            exit(EXIT_FAILURE);
-        }
-
-        size_t nbr_bytes_to_read = READ_COUNT_SIZE;
-        bool read_front = true;
-        size_t bytes_read_front = 0;
-        // we start reading from front, so if file_size < READ_COUNT_SIZE we will just read all
-        // data from front, so even though file_size - READ_COUNT_SIZE < 0 we will not use it
-        size_t bytes_read_end = file_size > READ_COUNT_SIZE ? file_size - READ_COUNT_SIZE : file_size; // or should be file_size - 1
-
-        do
-        {
-            if (read_front)
-            {
-                if (fseek(f_stream, bytes_read_front, SEEK_SET) == -1)
-                {
-                    printf("fseek front encountered error\n");
-                    // TODO: add flag and break that checks if success or not
-                    exit(EXIT_FAILURE);
-                }
-            }
-            else
-            {
-                if (fseek(f_stream, bytes_read_end, SEEK_SET) == -1)
-                {
-                    printf("fseek end encountered error\n");
-                    // TODO: add flag and break that checks if success or not
-                    exit(EXIT_FAILURE);
-                }
-            }
-
-            bytes_read = fread(buff + bytes_sum, sizeof(unsigned char), nbr_bytes_to_read, f_stream);
-
-            bytes_sum += bytes_read;
-
-            if (read_front)
-            {
-                printf("reading front\n");
-                bytes_read_front += bytes_read;
-                
-            }
-            else 
-            {
-                printf("reading end\n");
-                bytes_read_end -= bytes_read;
-            }
-            read_front = !read_front;
-
-            printf("bytes_read: %lu\n", bytes_read);
-
-            if (file_size - bytes_sum < READ_COUNT_SIZE)
-            {
-                printf("available data: %lu is less than read count: %lu\n", (file_size - bytes_sum), READ_COUNT_SIZE);
-                nbr_bytes_to_read = file_size - bytes_sum;
-                read_front = true;
-            }
-
-            if (bytes_sum == file_size)
-            {
-                printf("bytes_sum == file_size == %lu\n", file_size);
-                printf("bytes_read: %lu\n", bytes_read);
-                printf("read_front: %d \n", read_front);
-                break;
-            }
-        } while (bytes_read != 0 && bytes_read != -1);
-
-        write_to_file(buff, bytes_sum, "./read_rand_output");
-        uint64_t crc_val = crc_64_ecma(buff, bytes_sum);
-        // 8897370153309143817
-        // 407967422317943898
-        // 6609718696175242621 <-- read_seq
-
-        printf("CRC64 for Reading Rand: %lu\n", crc_val);
+        read_rand(file_path, buff);
         break;
-
     case MMAP_SEQ:
         printf("MMAP_SEQ strategy\n");
         break;
@@ -187,85 +89,116 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    close(file_descr);
-    free(buff);
     return 0;
 }
 
-int read_sequential(int file_descr, unsigned char *buff, size_t file_size)
+uint64_t read_rand(const char *file_path, unsigned char *buff)
 {
+    // opening file
+    int file_descr = open_file(file_path);
+    struct stat file_metadata;
+
+    // We want to know file size to calculate number of blocks
+    // I firstly want to calculate number of blocks since in my previous 
+    // attempt to do random read I didn't do that and was reading in a way
+    // that not full BLOCK_SIZE of data was read in the middle of the data,
+    // not at the end of it thus read sequential and read rand gave different 
+    // crc values.
+    get_file_metadata(file_descr, &file_metadata);
+
+    size_t file_size = file_metadata.st_size;
+    size_t nbr_of_blocks = file_size < BLOCK_SIZE 
+                        ? 1 
+                        : (file_size % BLOCK_SIZE == 0 
+                            ? file_size / BLOCK_SIZE
+                            : file_size / BLOCK_SIZE + 1);
     ssize_t bytes_read = 0;
-    size_t bytes_sum = 0;
-    uint64_t crc_val;
+    uint64_t final_crc_val = CRC_START_64_ECMA;
 
-    if (file_size <= BLOCK_SIZE)
+    printf("file size: %lu, block size: %lu, nbr of blocks: %lu\n", file_size, BLOCK_SIZE, nbr_of_blocks);
+
+    for (size_t i = 0; i < nbr_of_blocks; i++)
     {
-        // if file_size <= BLOCK_SIZE we can store whole file's data inside our
-        // buffer and just use crc_64_ecma to calculate crc64
-        do
+        uint64_t curr_crc_val = CRC_START_64_ECMA;
+        // we go like that: i = 0 read from left, i = 1 read from right ...
+        // nbr_of_blocks - 1 <-- since we count idxs from 0
+        size_t block_idx = i % 2 == 0 ? i / 2 : nbr_of_blocks - 1 - i /2;
+        printf("block idx: %lu, ", block_idx);
+
+        if (lseek(file_descr, (off_t)(block_idx * BLOCK_SIZE), SEEK_SET) < 0)
         {
-            bytes_read = read(file_descr, buff + bytes_sum, READ_COUNT_SIZE);
-            bytes_sum += bytes_read;
-        } while (bytes_read != 0 && bytes_read != -1);
+            printf("lseek front encountered error\n");
+            exit(EXIT_FAILURE);
+        }
 
-        crc_val = crc_64_ecma(buff, bytes_sum);
-    }
-    else
-    {
-        // If buffer is to small we read data till we have space, calculate part
-        // of crc using update_crc64, then we repeat this process
-        crc_val = CRC_START_64_ECMA;
-        size_t available_buff_space = BLOCK_SIZE;
+        bytes_read = read(file_descr, buff, BLOCK_SIZE);
 
-        do
+        if (bytes_read < 0)
         {
-            if (available_buff_space < READ_COUNT_SIZE)
-                bytes_read = read(file_descr, buff + bytes_sum,available_buff_space);
-            else
-                bytes_read = read(file_descr, buff + bytes_sum, READ_COUNT_SIZE);
-            
-            bytes_sum += bytes_read;
-            available_buff_space -= bytes_read;
-
-            if (available_buff_space == 0)
-            {
-                // if we ran out of space in buffer we calculate partial crc64
-                available_buff_space = BLOCK_SIZE;
-                bytes_sum = 0;
-                crc_val = calc_crc64_from_stream(buff, BLOCK_SIZE, crc_val);
-            }
-            else if (bytes_read == 0)
-            {
-                // If bytes_sum == 0, calc_crc64_from_stream won't do anything.
-                // Both bytes_sum and bytes_read may be 0, when file size is a 
-                // multiple of buff size
-                crc_val = calc_crc64_from_stream(buff, bytes_sum, crc_val);
-            }
-
-        } while (bytes_read != 0 && bytes_read != -1);
+            printf("ERROR in read\n");
+            exit(EXIT_FAILURE);
+        }
+        else if (bytes_read > 0)
+        {
+            // Unfortunately crc64, at least from library I use, is not 
+            // commutative thus we calculate crc64 for each block separately, 
+            // and then xor it with previous crc value stored in variable. XOR 
+            // is commutative, thus order of blocks won't matter, and since 
+            // blocks we read are the same but just in different order, crc64 
+            // of them will be also the same so XORing such values in the end 
+            // will give the same output.
+            curr_crc_val = calc_crc64_from_stream(curr_crc_val, buff, bytes_read);
+            final_crc_val = final_crc_val ^ curr_crc_val;
+        }
     }
 
-    if (bytes_read == -1)
+    printf("CRC64 for Reading Rand: %" PRIu64 "\n", final_crc_val);
+    close(file_descr);
+
+    return final_crc_val;
+}
+
+uint64_t read_sequential(const char* file_path, unsigned char *buff)
+{
+    // opening file
+    int file_descr = open_file(file_path);
+    ssize_t bytes_read = 0;
+    uint64_t curr_crc_val; 
+    uint64_t final_crc_val = CRC_START_64_ECMA;
+
+    do
     {
-        printf("Encountered error while reading file using READ_SEQ\n");
-        return ERROR;
-    }
+        curr_crc_val = CRC_START_64_ECMA;
+        bytes_read = read(file_descr, buff, BLOCK_SIZE);
+        // Unfortunately crc64, at least from library I use, is not commutative
+        // thus we calculate crc64 for each block separately, and then xor it
+        // with previous crc value stored in variable. XOR is commutative, thus
+        // order of blocks won't matter, and since blocks we read are the same
+        // but just in different order, crc64 of them will be also the same
+        // so XORing such values in the end will give the same output.
+        if (bytes_read > 0)
+        {
+            curr_crc_val = calc_crc64_from_stream(curr_crc_val, buff, bytes_read);
+            final_crc_val = final_crc_val ^ curr_crc_val;
+        }
+    } while (bytes_read != 0 && bytes_read != -1);
 
-    printf("CRC64 for Reading Sequential: %lu\n", crc_val);
+    printf("CRC64 for Reading Sequential: %" PRIu64 "\n", final_crc_val);
 
-    return SUCCESS;
+    close(file_descr);
+
+    return final_crc_val;
 }
 
 uint64_t calc_crc64_from_stream(
+    uint64_t crc_val,
     const unsigned char *buff,
-    size_t buf_len,
-    uint64_t crc_val
+    size_t buf_len
 )
 {
     for (size_t i = 0; i < buf_len; i++)
         crc_val = update_crc_64(crc_val, buff[i]);
 
-    printf("crc partial val: %lu\n", crc_val);
     return crc_val;
 }
 
@@ -349,6 +282,31 @@ void parse_cmdl_args(int argc,
         exit(EXIT_FAILURE);
     }
 }
+
+
+int open_file(const char* file_path)
+{
+    
+    int file_descr = open(file_path, O_RDONLY);
+
+    if (file_descr == -1)
+    {
+        printf("Provided file does not exist");
+        exit(EXIT_FAILURE);
+    }
+    return file_descr;
+}
+
+int get_file_metadata(int file_descr, struct stat *file_metadata)
+{
+    if (fstat(file_descr, file_metadata) == -1)
+    {
+        printf("fstat returned error\n");
+        exit(EXIT_FAILURE);
+    }
+    return 0;
+}
+
 
 void write_to_file(const unsigned char *buff, size_t buf_len, const char *filename)
 {
