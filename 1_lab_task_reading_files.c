@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 #include <inttypes.h>
 #include "./libcrc/include/checksum.h"
 
@@ -28,8 +29,7 @@ const size_t MB_1 = 1000 * KB_1;
 
 const size_t BLOCK_SIZE = KB_1;    
 
-#define ERROR -1
-#define SUCCESS 0
+#define NS_PER_SECOND 1000000000 
 
 // ####################################################
 // ############ FUNCTIONS PRE-DECLARATIONS ############
@@ -39,8 +39,6 @@ void parse_cmdl_args(int argc,
                      char *argv[],
                      const char **file_path,
                      enum Strategy *strategy);
-
-void write_to_file(const unsigned char *buff, size_t buf_len, const char *filename);
 
 uint64_t read_sequential(const char* file_path, unsigned char *buff);
 
@@ -55,6 +53,10 @@ uint64_t calc_crc64_from_stream(
     const unsigned char *buff,
     size_t buf_len
 );
+
+void calc_delta_time(struct timespec start, 
+                    struct timespec finish, 
+                    struct timespec *delta);
 
 int open_file(const char* file_path);
 
@@ -124,6 +126,10 @@ uint64_t mmap_rand(const char *file_path, unsigned char *buff)
                             ? file_size / BLOCK_SIZE
                             : file_size / BLOCK_SIZE + 1);
     
+    struct timespec start, finish, delta;
+
+    clock_gettime(CLOCK_REALTIME, &start);
+
     for(size_t i = 0; i < nbr_of_blocks; i++)
     {
         size_t block_idx = i % 2 == 0 ? i / 2 : nbr_of_blocks - 1 - i /2;
@@ -140,7 +146,11 @@ uint64_t mmap_rand(const char *file_path, unsigned char *buff)
         final_crc = final_crc ^ curr_crc;
     }
 
-    printf("CRC64 for mmap rand:\t %" PRIu64 "\n", final_crc);
+    clock_gettime(CLOCK_REALTIME, &finish);
+    calc_delta_time(start, finish, &delta);
+
+    printf("CRC64 for mmap rand:\t %" PRIu64 "\ttime: %d.%.9ld\n", 
+        final_crc, (int)delta.tv_sec, delta.tv_nsec);
 
     // we free the mapping
     if (munmap(file_mapping, file_size) < 0)
@@ -174,6 +184,10 @@ uint64_t mmap_sequential(const char *file_path, unsigned char *buff)
     uint64_t final_crc = CRC_START_64_ECMA;
     size_t buff_idx = 0;
 
+    struct timespec start, finish, delta;
+
+    clock_gettime(CLOCK_REALTIME, &start);
+
     for (size_t mapping_idx = 0; mapping_idx < file_size; mapping_idx++)
     {
         if (buff_idx == BLOCK_SIZE)
@@ -194,7 +208,11 @@ uint64_t mmap_sequential(const char *file_path, unsigned char *buff)
     curr_crc = calc_crc64_from_stream(CRC_START_64_ECMA, buff, buff_idx);
     final_crc = final_crc ^ curr_crc;
 
-    printf("CRC64 for mmap sequential:\t %" PRIu64 "\n", final_crc);
+    clock_gettime(CLOCK_REALTIME, &finish);
+    calc_delta_time(start, finish, &delta);
+
+    printf("CRC64 for mmap seq:\t %" PRIu64 "\ttime: %d.%.9ld\n", 
+        final_crc, (int)delta.tv_sec, delta.tv_nsec);
 
     // we free the mapping
     if (munmap(file_mapping, file_size) < 0)
@@ -228,6 +246,10 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
                             : file_size / BLOCK_SIZE + 1);
     ssize_t bytes_read = 0;
     uint64_t final_crc_val = CRC_START_64_ECMA;
+
+    struct timespec start, finish, delta;
+
+    clock_gettime(CLOCK_REALTIME, &start);
 
     for (size_t i = 0; i < nbr_of_blocks; i++)
     {
@@ -264,7 +286,12 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
         }
     }
 
-    printf("CRC64 for read rand:\t %" PRIu64 "\n", final_crc_val);
+    clock_gettime(CLOCK_REALTIME, &finish);
+    calc_delta_time(start, finish, &delta);
+
+    printf("CRC64 for read rand:\t %" PRIu64 "\ttime: %d.%.9ld\n", 
+        final_crc_val, (int)delta.tv_sec, delta.tv_nsec);
+
     close(file_descr);
 
     return final_crc_val;
@@ -277,6 +304,10 @@ uint64_t read_sequential(const char* file_path, unsigned char *buff)
     ssize_t bytes_read = 0;
     uint64_t curr_crc_val; 
     uint64_t final_crc_val = CRC_START_64_ECMA;
+
+    struct timespec start, finish, delta;
+
+    clock_gettime(CLOCK_REALTIME, &start);
 
     do
     {
@@ -295,7 +326,11 @@ uint64_t read_sequential(const char* file_path, unsigned char *buff)
         }
     } while (bytes_read != 0 && bytes_read != -1);
 
-    printf("CRC64 for read sequential:\t %" PRIu64 "\n", final_crc_val);
+    clock_gettime(CLOCK_REALTIME, &finish);
+    calc_delta_time(start, finish, &delta);
+
+    printf("CRC64 for read seq:\t %" PRIu64 "\ttime: %d.%.9ld\n", 
+        final_crc_val, (int)delta.tv_sec, delta.tv_nsec);
 
     close(file_descr);
 
@@ -419,11 +454,20 @@ int get_file_metadata(int file_descr, struct stat *file_metadata)
     return 0;
 }
 
-
-void write_to_file(const unsigned char *buff, size_t buf_len, const char *filename)
+void calc_delta_time(struct timespec start, 
+                    struct timespec finish, 
+                    struct timespec *delta)
 {
-    int fd = open(filename, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP);
-    if (write(fd, buff, buf_len) == -1)
-        printf("Write error\n");
-    close(fd);
+    delta->tv_nsec = finish.tv_nsec - start.tv_nsec;
+    delta->tv_sec  = finish.tv_sec - start.tv_sec;
+    if (delta->tv_sec > 0 && delta->tv_nsec < 0)
+    {
+        delta->tv_nsec += NS_PER_SECOND;
+        delta->tv_sec--;
+    }
+    else if (delta->tv_sec < 0 && delta->tv_nsec > 0)
+    {
+        delta->tv_nsec -= NS_PER_SECOND;
+        delta->tv_sec++;
+    }
 }
