@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -45,6 +46,10 @@ uint64_t read_sequential(const char* file_path, unsigned char *buff);
 
 uint64_t read_rand(const char *file_path, unsigned char *buff);
 
+uint64_t mmap_sequential(const char *file_path, unsigned char *buff);
+
+uint64_t mmap_rand(const char *file_path, unsigned char *buff);
+
 uint64_t calc_crc64_from_stream(
     uint64_t crc_val,
     const unsigned char *buff,
@@ -78,18 +83,127 @@ int main(int argc, char *argv[])
         read_rand(file_path, buff);
         break;
     case MMAP_SEQ:
-        printf("MMAP_SEQ strategy\n");
+        mmap_sequential(file_path, buff);
         break;
 
     case MMAP_RAND:
-        printf("MMAP_RAND strategy\n");
+        mmap_rand(file_path, buff);
         break;
     default:
         printf("Switch got unsupported reading strategy\n");
         exit(EXIT_FAILURE);
     }
 
+    free(buff);
     return 0;
+}
+
+uint64_t mmap_rand(const char *file_path, unsigned char *buff)
+{
+    int file_descr = open_file(file_path);
+    struct stat file_metadata;
+
+    get_file_metadata(file_descr, &file_metadata);
+    
+    size_t file_size = file_metadata.st_size;
+    unsigned char *file_mapping = mmap(NULL, 
+                                    file_size, 
+                                    PROT_READ, 
+                                    MAP_SHARED, 
+                                    file_descr, 
+                                    0);
+    // When mapping is done we can safely close fd, mapping will still exist
+    close(file_descr);
+
+    uint64_t curr_crc;
+    uint64_t final_crc = CRC_START_64_ECMA;
+    // like in read_rand we calculate number of blocks
+    size_t nbr_of_blocks = file_size < BLOCK_SIZE 
+                        ? 1 
+                        : (file_size % BLOCK_SIZE == 0 
+                            ? file_size / BLOCK_SIZE
+                            : file_size / BLOCK_SIZE + 1);
+    
+    for(size_t i = 0; i < nbr_of_blocks; i++)
+    {
+        size_t block_idx = i % 2 == 0 ? i / 2 : nbr_of_blocks - 1 - i /2;
+        size_t buff_idx = 0;
+
+        for(size_t mapping_idx = block_idx * BLOCK_SIZE; 
+            mapping_idx < file_size && buff_idx < BLOCK_SIZE; 
+            mapping_idx++, buff_idx++)
+        {
+            buff[buff_idx] = file_mapping[mapping_idx];
+        }
+
+        curr_crc = calc_crc64_from_stream(CRC_START_64_ECMA, buff, buff_idx);
+        final_crc = final_crc ^ curr_crc;
+    }
+
+    printf("CRC64 for mmap rand:\t %" PRIu64 "\n", final_crc);
+
+    // we free the mapping
+    if (munmap(file_mapping, file_size) < 0)
+    {
+        printf("file unmapping error\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return final_crc;
+}
+
+uint64_t mmap_sequential(const char *file_path, unsigned char *buff)
+{
+    // link to good mmap explanation: https://membarrier.wordpress.com/2024/08/10/memory-management-the-mmap-call/
+    int file_descr = open_file(file_path);
+    struct stat file_metadata;
+
+    get_file_metadata(file_descr, &file_metadata);
+    
+    size_t file_size = file_metadata.st_size;
+    unsigned char *file_mapping = mmap(NULL, 
+                                    file_size, 
+                                    PROT_READ, 
+                                    MAP_SHARED, 
+                                    file_descr, 
+                                    0);
+    // When mapping is done we can safely close fd, mapping will still exist
+    close(file_descr);
+
+    uint64_t curr_crc;
+    uint64_t final_crc = CRC_START_64_ECMA;
+    size_t buff_idx = 0;
+
+    for (size_t mapping_idx = 0; mapping_idx < file_size; mapping_idx++)
+    {
+        if (buff_idx == BLOCK_SIZE)
+        {
+            curr_crc = calc_crc64_from_stream(CRC_START_64_ECMA,
+                                                    buff, BLOCK_SIZE);
+            final_crc = final_crc ^ curr_crc;
+
+            buff_idx = 0;
+        }
+
+        buff[buff_idx] = file_mapping[mapping_idx];
+        buff_idx += 1;
+    }
+
+    // in loop above before we calculate crc64 for last block, we leave loop
+    // so always after the loop we need to do below calculation: 
+    curr_crc = calc_crc64_from_stream(CRC_START_64_ECMA, buff, buff_idx);
+    final_crc = final_crc ^ curr_crc;
+
+    printf("CRC64 for mmap sequential:\t %" PRIu64 "\n", final_crc);
+
+    // we free the mapping
+    if (munmap(file_mapping, file_size) < 0)
+    {
+        printf("file unmapping error\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return final_crc;
 }
 
 uint64_t read_rand(const char *file_path, unsigned char *buff)
@@ -115,15 +229,13 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
     ssize_t bytes_read = 0;
     uint64_t final_crc_val = CRC_START_64_ECMA;
 
-    printf("file size: %lu, block size: %lu, nbr of blocks: %lu\n", file_size, BLOCK_SIZE, nbr_of_blocks);
-
     for (size_t i = 0; i < nbr_of_blocks; i++)
     {
         uint64_t curr_crc_val = CRC_START_64_ECMA;
+
         // we go like that: i = 0 read from left, i = 1 read from right ...
         // nbr_of_blocks - 1 <-- since we count idxs from 0
         size_t block_idx = i % 2 == 0 ? i / 2 : nbr_of_blocks - 1 - i /2;
-        printf("block idx: %lu, ", block_idx);
 
         if (lseek(file_descr, (off_t)(block_idx * BLOCK_SIZE), SEEK_SET) < 0)
         {
@@ -152,7 +264,7 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
         }
     }
 
-    printf("CRC64 for Reading Rand: %" PRIu64 "\n", final_crc_val);
+    printf("CRC64 for read rand:\t %" PRIu64 "\n", final_crc_val);
     close(file_descr);
 
     return final_crc_val;
@@ -183,7 +295,7 @@ uint64_t read_sequential(const char* file_path, unsigned char *buff)
         }
     } while (bytes_read != 0 && bytes_read != -1);
 
-    printf("CRC64 for Reading Sequential: %" PRIu64 "\n", final_crc_val);
+    printf("CRC64 for read sequential:\t %" PRIu64 "\n", final_crc_val);
 
     close(file_descr);
 
