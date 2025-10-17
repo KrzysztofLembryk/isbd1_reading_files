@@ -21,13 +21,14 @@ enum Strategy
     READ_SEQ,
     READ_RAND,
     MMAP_SEQ,
-    MMAP_RAND
+    MMAP_RAND,
+    ALL
 } Strategy;
 
 const size_t KB_1 = 1000;
 const size_t MB_1 = 1000 * KB_1;
 
-const size_t BLOCK_SIZE = KB_1;    
+const size_t BLOCK_SIZE = 8 * MB_1;    
 
 #define NS_PER_SECOND 1000000000 
 
@@ -78,6 +79,12 @@ int main(int argc, char *argv[])
     // start measuring time
     switch (reading_strategy)
     {
+    case ALL:
+        read_sequential(file_path, buff);
+        read_rand(file_path, buff);
+        mmap_sequential(file_path, buff);
+        mmap_rand(file_path, buff);
+        break;
     case READ_SEQ:
         read_sequential(file_path, buff);
         break;
@@ -87,7 +94,6 @@ int main(int argc, char *argv[])
     case MMAP_SEQ:
         mmap_sequential(file_path, buff);
         break;
-
     case MMAP_RAND:
         mmap_rand(file_path, buff);
         break;
@@ -368,7 +374,7 @@ void parse_cmdl_args(int argc,
         case 'h':
             printf("Usage: %s [-h] [-f filepath] [-s strategy]\n", argv[0]);
             printf("  -h           Display this help message\n");
-            printf("  -f filepath  Specify a file to read\n");
+            printf("  -f filepath  Specify a file to read (mandatory)\n");
             printf("  -s strategy  \n\tAllowed reading strategies are:\n");
             printf("\t rs - read sequential\n\t rr - read random \n");
             printf("\t ms - mmap sequential \n\t mr - mmap random\n");
@@ -428,8 +434,12 @@ void parse_cmdl_args(int argc,
         printf("Error: Missing required option -f, use -h for help\n");
         exit(EXIT_FAILURE);
     }
-}
 
+    if (!is_strategy_provided)
+    {
+        *strategy = ALL;
+    }
+}
 
 int open_file(const char* file_path)
 {
