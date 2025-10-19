@@ -25,6 +25,8 @@ enum Strategy
     ALL
 } Strategy;
 
+#define ERROR -1
+
 const size_t KB_1 = 1000;
 const size_t MB_1 = 1000 * KB_1;
 
@@ -41,13 +43,13 @@ void parse_cmdl_args(int argc,
                      const char **file_path,
                      enum Strategy *strategy);
 
-uint64_t read_sequential(const char* file_path, unsigned char *buff);
+ssize_t read_sequential(const char* file_path, unsigned char *buff);
 
-uint64_t read_rand(const char *file_path, unsigned char *buff);
+ssize_t read_rand(const char *file_path, unsigned char *buff);
 
-uint64_t mmap_sequential(const char *file_path, unsigned char *buff);
+ssize_t mmap_sequential(const char *file_path, unsigned char *buff);
 
-uint64_t mmap_rand(const char *file_path, unsigned char *buff);
+ssize_t mmap_rand(const char *file_path, unsigned char *buff);
 
 uint64_t calc_crc64_from_stream(
     uint64_t crc_val,
@@ -76,7 +78,6 @@ int main(int argc, char *argv[])
 
     unsigned char *buff = (unsigned char *)calloc(BLOCK_SIZE, sizeof(unsigned char));
 
-    // start measuring time
     switch (reading_strategy)
     {
     case ALL:
@@ -106,12 +107,20 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-uint64_t mmap_rand(const char *file_path, unsigned char *buff)
+ssize_t mmap_rand(const char *file_path, unsigned char *buff)
 {
     int file_descr = open_file(file_path);
+
+    if (file_descr == ERROR)
+        return ERROR;
+
     struct stat file_metadata;
 
-    get_file_metadata(file_descr, &file_metadata);
+    if (get_file_metadata(file_descr, &file_metadata) == ERROR)
+    {
+        close(file_descr);
+        return ERROR;
+    }
     
     size_t file_size = file_metadata.st_size;
     unsigned char *file_mapping = mmap(NULL, 
@@ -122,6 +131,12 @@ uint64_t mmap_rand(const char *file_path, unsigned char *buff)
                                     0);
     // When mapping is done we can safely close fd, mapping will still exist
     close(file_descr);
+
+    if (file_mapping == MAP_FAILED)
+    {
+        printf("mmap failed");
+        return ERROR;
+    }
 
     uint64_t curr_crc;
     uint64_t final_crc = CRC_START_64_ECMA;
@@ -162,19 +177,27 @@ uint64_t mmap_rand(const char *file_path, unsigned char *buff)
     if (munmap(file_mapping, file_size) < 0)
     {
         printf("file unmapping error\n");
-        exit(EXIT_FAILURE);
+        return ERROR;
     }
 
-    return final_crc;
+    return (ssize_t)final_crc;
 }
 
-uint64_t mmap_sequential(const char *file_path, unsigned char *buff)
+ssize_t mmap_sequential(const char *file_path, unsigned char *buff)
 {
     // link to good mmap explanation: https://membarrier.wordpress.com/2024/08/10/memory-management-the-mmap-call/
     int file_descr = open_file(file_path);
+
+    if (file_descr == ERROR)
+        return ERROR;
+
     struct stat file_metadata;
 
-    get_file_metadata(file_descr, &file_metadata);
+    if (get_file_metadata(file_descr, &file_metadata) == ERROR)
+    {
+        close(file_descr);
+        return ERROR;
+    }
     
     size_t file_size = file_metadata.st_size;
     unsigned char *file_mapping = mmap(NULL, 
@@ -185,6 +208,12 @@ uint64_t mmap_sequential(const char *file_path, unsigned char *buff)
                                     0);
     // When mapping is done we can safely close fd, mapping will still exist
     close(file_descr);
+
+    if (file_mapping == MAP_FAILED)
+    {
+        printf("mmap failed");
+        return ERROR;
+    }
 
     uint64_t curr_crc;
     uint64_t final_crc = CRC_START_64_ECMA;
@@ -224,16 +253,20 @@ uint64_t mmap_sequential(const char *file_path, unsigned char *buff)
     if (munmap(file_mapping, file_size) < 0)
     {
         printf("file unmapping error\n");
-        exit(EXIT_FAILURE);
+        return ERROR;
     }
 
-    return final_crc;
+    return (ssize_t)final_crc;
 }
 
-uint64_t read_rand(const char *file_path, unsigned char *buff)
+ssize_t read_rand(const char *file_path, unsigned char *buff)
 {
     // opening file
     int file_descr = open_file(file_path);
+
+    if (file_descr == ERROR)
+        return ERROR;
+
     struct stat file_metadata;
 
     // We want to know file size to calculate number of blocks
@@ -242,7 +275,12 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
     // that not full BLOCK_SIZE of data was read in the middle of the data,
     // not at the end of it thus read sequential and read rand gave different 
     // crc values.
-    get_file_metadata(file_descr, &file_metadata);
+
+    if (get_file_metadata(file_descr, &file_metadata) == ERROR)
+    {
+        close(file_descr);
+        return ERROR;
+    }
 
     size_t file_size = file_metadata.st_size;
     size_t nbr_of_blocks = file_size < BLOCK_SIZE 
@@ -268,7 +306,8 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
         if (lseek(file_descr, (off_t)(block_idx * BLOCK_SIZE), SEEK_SET) < 0)
         {
             printf("lseek front encountered error\n");
-            exit(EXIT_FAILURE);
+            close(file_descr);
+            return ERROR;
         }
 
         bytes_read = read(file_descr, buff, BLOCK_SIZE);
@@ -276,7 +315,8 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
         if (bytes_read < 0)
         {
             printf("ERROR in read\n");
-            exit(EXIT_FAILURE);
+            close(file_descr);
+            return ERROR;
         }
         else if (bytes_read > 0)
         {
@@ -300,13 +340,17 @@ uint64_t read_rand(const char *file_path, unsigned char *buff)
 
     close(file_descr);
 
-    return final_crc_val;
+    return (ssize_t)final_crc_val;
 }
 
-uint64_t read_sequential(const char* file_path, unsigned char *buff)
+ssize_t read_sequential(const char* file_path, unsigned char *buff)
 {
     // opening file
     int file_descr = open_file(file_path);
+
+    if (file_descr == ERROR)
+        return ERROR;
+
     ssize_t bytes_read = 0;
     uint64_t curr_crc_val; 
     uint64_t final_crc_val = CRC_START_64_ECMA;
@@ -330,17 +374,24 @@ uint64_t read_sequential(const char* file_path, unsigned char *buff)
             curr_crc_val = calc_crc64_from_stream(curr_crc_val, buff, bytes_read);
             final_crc_val = final_crc_val ^ curr_crc_val;
         }
-    } while (bytes_read != 0 && bytes_read != -1);
+    } while (bytes_read != 0 && bytes_read != ERROR);
 
     clock_gettime(CLOCK_REALTIME, &finish);
     calc_delta_time(start, finish, &delta);
+
+    if (bytes_read < 0)
+    {
+        printf("error in read_sequential");
+        close(file_descr);
+        return ERROR;
+    }
 
     printf("CRC64 for read seq:\t %" PRIu64 "\ttime: %d.%.9ld\n", 
         final_crc_val, (int)delta.tv_sec, delta.tv_nsec);
 
     close(file_descr);
 
-    return final_crc_val;
+    return (ssize_t)final_crc_val;
 }
 
 uint64_t calc_crc64_from_stream(
@@ -367,7 +418,7 @@ void parse_cmdl_args(int argc,
 
     // ':' at the front allows programme to distinguish between '?' and ':' case
     // ':' right after option means this option must have value supplied
-    while ((option = getopt(argc, argv, ":hf:s:")) != -1)
+    while ((option = getopt(argc, argv, ":hf:s:")) != ERROR)
     {
         switch (option)
         {
@@ -446,20 +497,20 @@ int open_file(const char* file_path)
     
     int file_descr = open(file_path, O_RDONLY);
 
-    if (file_descr == -1)
+    if (file_descr == ERROR)
     {
         printf("Provided file does not exist");
-        exit(EXIT_FAILURE);
+        return ERROR;
     }
     return file_descr;
 }
 
 int get_file_metadata(int file_descr, struct stat *file_metadata)
 {
-    if (fstat(file_descr, file_metadata) == -1)
+    if (fstat(file_descr, file_metadata) == ERROR)
     {
         printf("fstat returned error\n");
-        exit(EXIT_FAILURE);
+        return ERROR;
     }
     return 0;
 }
