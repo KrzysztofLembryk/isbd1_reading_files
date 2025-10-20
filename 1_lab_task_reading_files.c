@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -25,13 +26,13 @@ enum Strategy
     ALL
 } Strategy;
 
+
+const size_t KB_1 = 1024;
+const size_t MB_1 = 1024 * KB_1;
+
+size_t BLOCK_SIZE = 8 * MB_1;    
+
 #define ERROR -1
-
-const size_t KB_1 = 1000;
-const size_t MB_1 = 1000 * KB_1;
-
-const size_t BLOCK_SIZE = 8 * MB_1;    
-
 #define NS_PER_SECOND 1000000000 
 
 // ####################################################
@@ -41,7 +42,8 @@ const size_t BLOCK_SIZE = 8 * MB_1;
 void parse_cmdl_args(int argc,
                      char *argv[],
                      const char **file_path,
-                     enum Strategy *strategy);
+                     enum Strategy *strategy,
+                     size_t *block_size);
 
 ssize_t read_sequential(const char* file_path, unsigned char *buff);
 
@@ -74,9 +76,15 @@ int main(int argc, char *argv[])
     const char *file_path = NULL;
     enum Strategy reading_strategy;
 
-    parse_cmdl_args(argc, argv, &file_path, &reading_strategy);
+    parse_cmdl_args(argc, argv, &file_path, &reading_strategy, &BLOCK_SIZE);
 
     unsigned char *buff = (unsigned char *)calloc(BLOCK_SIZE, sizeof(unsigned char));
+
+    if (!buff)
+    {
+        perror("main - malloc error");
+        return ERROR;
+    }
 
     switch (reading_strategy)
     {
@@ -99,8 +107,7 @@ int main(int argc, char *argv[])
         mmap_rand(file_path, buff);
         break;
     default:
-        printf("Switch got unsupported reading strategy\n");
-        exit(EXIT_FAILURE);
+        perror("Switch got unsupported reading strategy\n");
     }
 
     free(buff);
@@ -134,7 +141,7 @@ ssize_t mmap_rand(const char *file_path, unsigned char *buff)
 
     if (file_mapping == MAP_FAILED)
     {
-        printf("mmap failed");
+        perror("mmap_rand - mmap error");
         return ERROR;
     }
 
@@ -176,7 +183,7 @@ ssize_t mmap_rand(const char *file_path, unsigned char *buff)
     // we free the mapping
     if (munmap(file_mapping, file_size) < 0)
     {
-        printf("file unmapping error\n");
+        perror("mmap_rand - file unmapping error");
         return ERROR;
     }
 
@@ -211,11 +218,11 @@ ssize_t mmap_sequential(const char *file_path, unsigned char *buff)
 
     if (file_mapping == MAP_FAILED)
     {
-        printf("mmap failed");
+        perror("mmap_sequential - mmap failed");
         return ERROR;
     }
 
-    uint64_t curr_crc;
+    uint64_t curr_crc = CRC_START_64_ECMA;
     uint64_t final_crc = CRC_START_64_ECMA;
     size_t buff_idx = 0;
 
@@ -252,7 +259,7 @@ ssize_t mmap_sequential(const char *file_path, unsigned char *buff)
     // we free the mapping
     if (munmap(file_mapping, file_size) < 0)
     {
-        printf("file unmapping error\n");
+        perror("mmap_sequential - file unmapping error");
         return ERROR;
     }
 
@@ -305,7 +312,7 @@ ssize_t read_rand(const char *file_path, unsigned char *buff)
 
         if (lseek(file_descr, (off_t)(block_idx * BLOCK_SIZE), SEEK_SET) < 0)
         {
-            printf("lseek front encountered error\n");
+            perror("read_rand - lseek encountered error");
             close(file_descr);
             return ERROR;
         }
@@ -314,7 +321,7 @@ ssize_t read_rand(const char *file_path, unsigned char *buff)
 
         if (bytes_read < 0)
         {
-            printf("ERROR in read\n");
+            perror("read_rand - ERROR in read\n");
             close(file_descr);
             return ERROR;
         }
@@ -381,7 +388,7 @@ ssize_t read_sequential(const char* file_path, unsigned char *buff)
 
     if (bytes_read < 0)
     {
-        printf("error in read_sequential");
+        perror("read_sequential - error in read");
         close(file_descr);
         return ERROR;
     }
@@ -409,23 +416,26 @@ uint64_t calc_crc64_from_stream(
 void parse_cmdl_args(int argc,
                      char *argv[],
                      const char **file_path,
-                     enum Strategy *strategy)
+                     enum Strategy *strategy,
+                     size_t *block_size)
 {
     // parse cmd line options
     int option;
-    int is_file_path_provided = 0;
-    int is_strategy_provided = 0;
+    bool is_file_path_provided = false;
+    bool is_strategy_provided = false;
+    bool are_bytes_provided = false;
 
     // ':' at the front allows programme to distinguish between '?' and ':' case
     // ':' right after option means this option must have value supplied
-    while ((option = getopt(argc, argv, ":hf:s:")) != ERROR)
+    while ((option = getopt(argc, argv, ":hf:s:b:")) != ERROR)
     {
         switch (option)
         {
         case 'h':
             printf("Usage: %s [-h] [-f filepath] [-s strategy]\n", argv[0]);
-            printf("  -h           Display this help message\n");
-            printf("  -f filepath  Specify a file to read (mandatory)\n");
+            printf("  -h            Display this help message\n");
+            printf("  -f filepath   Specify a file to read (mandatory)\n");
+            printf("  -b block size Size of block we read in bytes\n");
             printf("  -s strategy  \n\tAllowed reading strategies are:\n");
             printf("\t rs - read sequential\n\t rr - read random \n");
             printf("\t ms - mmap sequential \n\t mr - mmap random\n");
@@ -439,10 +449,20 @@ void parse_cmdl_args(int argc,
             }
             else
             {
-                // printf("Opening file: %s\n", optarg);
                 *file_path = optarg;
-                is_file_path_provided = 1;
+                is_file_path_provided = true;
             }
+            break;
+        case 'b':
+            if (are_bytes_provided)
+            {
+                printf("Option -b is allowed to be used only once\n");
+                exit(EXIT_FAILURE);
+            }
+
+            are_bytes_provided = true;
+
+            *block_size = (size_t)strtol(optarg, NULL, 10);
             break;
         case 's':
             if (is_strategy_provided)
@@ -450,9 +470,8 @@ void parse_cmdl_args(int argc,
                 printf("Option -s is allowed to be used only once\n");
                 exit(EXIT_FAILURE);
             }
-            // printf("chosen strategy: %s\n", optarg);
 
-            is_strategy_provided = 1;
+            is_strategy_provided = true;
 
             if (strcmp(optarg, "rs") == 0)
                 *strategy = READ_SEQ;
@@ -490,6 +509,13 @@ void parse_cmdl_args(int argc,
     {
         *strategy = ALL;
     }
+
+    if (!are_bytes_provided)
+    {
+        *block_size = 8 * MB_1;
+    }
+
+    printf("opening file: '%s', BLOCK SIZE: %lu\n", *file_path, *block_size);
 }
 
 int open_file(const char* file_path)
@@ -499,7 +525,7 @@ int open_file(const char* file_path)
 
     if (file_descr == ERROR)
     {
-        printf("Provided file does not exist");
+        perror("open_file");
         return ERROR;
     }
     return file_descr;
@@ -509,7 +535,7 @@ int get_file_metadata(int file_descr, struct stat *file_metadata)
 {
     if (fstat(file_descr, file_metadata) == ERROR)
     {
-        printf("fstat returned error\n");
+        perror("get_file_metadata - fstat returned error\n");
         return ERROR;
     }
     return 0;

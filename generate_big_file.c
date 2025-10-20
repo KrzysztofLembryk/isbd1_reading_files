@@ -6,8 +6,7 @@
 
 int main(void) {
     const char *filename = "random_digits_5GiB.bin";
-    /* 5 GiB = 5 * 1024^3 = 5368709120 bytes */
-    const uint64_t total_bytes = 5ULL * 1024ULL * 1024ULL * 1024ULL;
+    const uint64_t total_bytes = 20ULL * 1024ULL * 1024ULL * 1024ULL;
     const size_t BUF_SIZE = 8 * 1024 * 1024; /* 8 MiB buffer */
     unsigned char *buf = malloc(BUF_SIZE);
     if (!buf) {
