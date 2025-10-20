@@ -45,13 +45,13 @@ void parse_cmdl_args(int argc,
                      enum Strategy *strategy,
                      size_t *block_size);
 
-ssize_t read_sequential(const char* file_path, unsigned char *buff);
+int read_sequential(const char* file_path, unsigned char *buff);
 
-ssize_t read_rand(const char *file_path, unsigned char *buff);
+int read_rand(const char *file_path, unsigned char *buff);
 
-ssize_t mmap_sequential(const char *file_path, unsigned char *buff);
+int mmap_sequential(const char *file_path, unsigned char *buff);
 
-ssize_t mmap_rand(const char *file_path, unsigned char *buff);
+int mmap_rand(const char *file_path, unsigned char *buff);
 
 uint64_t calc_crc64_from_stream(
     uint64_t crc_val,
@@ -86,35 +86,44 @@ int main(int argc, char *argv[])
         return ERROR;
     }
 
+    ssize_t ret_val = 0;
+
     switch (reading_strategy)
     {
     case ALL:
-        read_sequential(file_path, buff);
-        read_rand(file_path, buff);
-        mmap_sequential(file_path, buff);
-        mmap_rand(file_path, buff);
+        if (read_sequential(file_path, buff) == ERROR 
+            || read_rand(file_path, buff) == ERROR
+            || mmap_sequential(file_path, buff) == ERROR
+            || mmap_rand(file_path, buff) == ERROR)
+        {
+            ret_val = ERROR;
+        }
         break;
     case READ_SEQ:
-        read_sequential(file_path, buff);
+        ret_val = read_sequential(file_path, buff);
         break;
     case READ_RAND:
-        read_rand(file_path, buff);
+        ret_val = read_rand(file_path, buff);
         break;
     case MMAP_SEQ:
-        mmap_sequential(file_path, buff);
+        ret_val = mmap_sequential(file_path, buff);
         break;
     case MMAP_RAND:
-        mmap_rand(file_path, buff);
+        ret_val = mmap_rand(file_path, buff);
         break;
     default:
         perror("Switch got unsupported reading strategy\n");
     }
 
     free(buff);
+
+    if (ret_val == ERROR)
+        return ERROR;
+
     return 0;
 }
 
-ssize_t mmap_rand(const char *file_path, unsigned char *buff)
+int mmap_rand(const char *file_path, unsigned char *buff)
 {
     int file_descr = open_file(file_path);
 
@@ -187,10 +196,10 @@ ssize_t mmap_rand(const char *file_path, unsigned char *buff)
         return ERROR;
     }
 
-    return (ssize_t)final_crc;
+    return 0;
 }
 
-ssize_t mmap_sequential(const char *file_path, unsigned char *buff)
+int mmap_sequential(const char *file_path, unsigned char *buff)
 {
     // link to good mmap explanation: https://membarrier.wordpress.com/2024/08/10/memory-management-the-mmap-call/
     int file_descr = open_file(file_path);
@@ -263,10 +272,10 @@ ssize_t mmap_sequential(const char *file_path, unsigned char *buff)
         return ERROR;
     }
 
-    return (ssize_t)final_crc;
+    return 0;
 }
 
-ssize_t read_rand(const char *file_path, unsigned char *buff)
+int read_rand(const char *file_path, unsigned char *buff)
 {
     // opening file
     int file_descr = open_file(file_path);
@@ -347,10 +356,10 @@ ssize_t read_rand(const char *file_path, unsigned char *buff)
 
     close(file_descr);
 
-    return (ssize_t)final_crc_val;
+    return 0;
 }
 
-ssize_t read_sequential(const char* file_path, unsigned char *buff)
+int read_sequential(const char* file_path, unsigned char *buff)
 {
     // opening file
     int file_descr = open_file(file_path);
@@ -398,7 +407,7 @@ ssize_t read_sequential(const char* file_path, unsigned char *buff)
 
     close(file_descr);
 
-    return (ssize_t)final_crc_val;
+    return 0;
 }
 
 uint64_t calc_crc64_from_stream(
