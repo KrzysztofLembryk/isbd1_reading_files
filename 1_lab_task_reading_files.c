@@ -117,10 +117,7 @@ int main(int argc, char *argv[])
 
     free(buff);
 
-    if (ret_val == ERROR)
-        return ERROR;
-
-    return 0;
+    return ret_val;
 }
 
 int mmap_rand(const char *file_path, unsigned char *buff)
